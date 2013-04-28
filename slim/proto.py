@@ -37,7 +37,7 @@ class SlimProtocol(object):
         # 10 to  36 bytes
         data = struct.pack(
             '! B B 6s 16s H Q 2s',
-            self.deviceid,   # deviceid 1 is an old slimp3, >=2 <= 4 is a squeezebox
+            self.deviceid,
             self.revision,   # firmware version
             self.mac,
             self.hostid,
@@ -81,14 +81,42 @@ class SlimProtocol(object):
         expect, = struct.unpack('! H', data)
         log.debug('need to fetch %d bytes of data' % expect)
         data = self.receive(expect)
-        log.info('received command %s' % data[:4])
+        command = 'cmd_%s' % data[:4].decode('ascii')
+        log.info('received command %s' % command)
+        command = getattr(self, command)
+        command(data[4:])
+
+    def cmd_strm(self, data):
+        """process a str command send by the server"""
+        log.debug('processing strm command')
+        header = data[:16]
+        body = data[16:].decode('ascii')
+        (
+            subcommand,         # single char
+            autostart,          # 0 off, 1=25%, 2=50%, 3=75%, 4=100%
+            streamformat,       # singlechar p or m
+            pcmsamplesize,      # '0'=8, '1'=16, '2'=20, '3'=32, '?'=mp3
+            pcmsamplerate,      # '0'=11kHz, '1'=22kHz, '2'=32kHz,
+                                # '3'=44.1kHz, '4'=48kHz usually '3' '?'=mp3
+            pcmchannels,        # '1'=mono, '2'=stereo usually '2' '?'=mp3
+            pcmendian,          # '0' = big, '1' = little
+                                # ('1'=wav, '0'=aif, '?'=mp3)
+            prebuffer_slience,  # usually 5
+                                # (mpeg prebuffer x frames of silence)
+            spdif_enable,       # '0'=auto, '1'=on, '2'=off usually 0
+            # reserved
+            server_port,        # Server Port to use (9000 is the default)
+            server_ip,          # 0 means use IP of control server
+        ) = struct.unpack('! c b c c c c c b b x h I', header)
+        log.debug(server_port)
+        # NEXT: are those bytes realy chars? check with a real device
 
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
     # disco = SlimDiscovery()
     #( host, port), name = disco.find()[0]
-    host = '192.168.2.200'
+    host = '127.0.0.1'
     port = meta.SLIMPORT
     proto = SlimProtocol(host)
     proto.connect()
