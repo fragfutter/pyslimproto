@@ -1,5 +1,6 @@
 import logging
 import uuid
+import struct
 
 SLIMPORT = 3483
 
@@ -10,7 +11,8 @@ mac adresse of primary interface as byte array.
 This is not clean as it uses uuid, but will always result
 in the same uuid so slim is happy
 """
-mac = uuid.getnode().to_bytes(6, 'big')
+# only in python 3  mac = uuid.getnode().to_bytes(6, 'big')
+mac = bytearray(struct.pack('>q', uuid.getnode())[2:])
 """deviceid, 1 is an old slimp3, >=2 <= 4 is a squeezebox, 12 is squeezeplay"""
 deviceid = 12
 """firmware version"""

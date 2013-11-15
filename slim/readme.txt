@@ -4,7 +4,7 @@ Types of data packages
 see Slim/Networking/Slimproto.pm
 
 four-characters commandname
-four-bytes package length (including header?
+four-bytes package length (of all fields)
 field
 field
 field
@@ -14,7 +14,7 @@ HELO, IR  , RESP, BODY...
 
 --+ fixed length Server-Client
 
-two bytes length (that is number of bytes needed for the complete message)
+two bytes length (that is number of bytes needed for the complete message, including command name)
 four characters command
 field
 field

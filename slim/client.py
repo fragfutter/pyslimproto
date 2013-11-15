@@ -1,16 +1,28 @@
+import re
 import logging
 import socket
 import time
 import struct
 import meta
 from discover import SlimDiscovery
-import structure
+from message import SlimServerMessage, Helo, Bye, Stat
 import util
 
 log = meta.log
 
 
 class SlimClient(object):
+    """
+    A client for slimdevices media server
+
+    The main loop connects to a slimdevises server and sends a helo message.
+    Afterwards it waits for SlimServerMessages. Messages are parsed by calling
+    the SlimServerMessageFactory. Afterwards a function "handle_%s" % msg.name
+    is called.
+
+    To implement functionality add a function handle_msgname for each message
+    type you want to process.
+    """
     deviceid = meta.deviceid
     revision = meta.revision
     mac = meta.mac
@@ -47,20 +59,6 @@ class SlimClient(object):
         MAX = pow(2, 32)  # make pep8 happy and do not use **
         return int((time.time() * 1000) % MAX)
 
-    def helo(self):
-        """tell the server who we are"""
-        data = structure.Helo().pack(
-            self.deviceid,
-            self.revision,   # firmware version
-            self.mac,
-            self.hostid,
-            self.wifichannels,   # unsigned short = two bytes
-            self.bytesreceived,  # unsigned long long = 8 bytes
-            self.language,
-        )
-        # EXTEND: also send capabilities information in HELO
-        self.send(data)
-
     def dump(self, data, prefix=""):
         # log a hexdump
         # 0011 2233 4455 6677  8899 aabb ccdd eeff    .... .....  .... ....
@@ -75,7 +73,6 @@ class SlimClient(object):
         """wait for length bytes of data.
         raises timeout error
         raises no data error"""
-        log.debug('receiving %d bytes of data' % length)
         result = b''
         while length > 0:
             data = self.connection.recv(min(length, self.buffersize))
@@ -88,20 +85,89 @@ class SlimClient(object):
             raise socket.error('too much data received')
         return result
 
-    def receive_cmd(self):
+    def receive_message(self):
         expect = 2  # first thing we want is the length
         log.debug('waiting for length field')
         data = self.receive(expect)
         expect, = struct.unpack('! H', data)
         log.debug('need to fetch %d bytes of data' % expect)
         data = data + self.receive(expect)
-        command = 'cmd_%s' % data[2:6].decode('ascii').lower()
-        log.info('received command %s' % command)
-        return command, data
+        message = SlimServerMessage.factory(data)
+        return message
 
-    def stat_stmt(self, timestamp=0):
+    def run(self):
+        """connect to slimserver, introduce self and wait for commands"""
+        self.connect()
+        self.action_helo()
+        i = 200
+        while True:
+            try:
+                message = self.receive_message()
+            except socket.timeout:
+                # no data from server
+                log.debug("timeout waiting for message")
+                if self.__terminate:
+                    return
+                else:
+                    continue
+            self.handle_message(message)
+            i = i - 1
+            if i < 0:
+                break
+        self.action_bye()
+
+    def quit(self):
+        """set terminate flag. """
+        self.__terminate = True
+
+    def handle_message(self, message, name=None):
+        """dispatch message to handler.
+        :message:
+            a SlimMessage
+        :name:
+            optional overwrite message-name. For submessages
+            where the name is not identical to the message-name.
+        """
+        if not message:
+            log.info("empty message, ignoring")
+            return
+        if not name:
+            name = re.sub('[^a-z_]', '', message.name.lower())
+        handler_name = 'handle_%s' % name
+        handler = getattr(self, handler_name, None)  # which function handles this?
+        if not handler:
+            log.info("no handler for message (%s), ignoring %s" % (handler_name, message))
+            return
+        handler(message)
+
+    ### Actions
+    def action_bye(self):
+        """send bye and disconnect"""
+        if self.is_connected:
+            data = Bye().pack(upgrade=False)
+            try:
+                self.send(data)
+            except socket.timeout:
+                pass  # ignore timeout, the server might have gone
+        self.connection = None
+
+    def action_helo(self):
+        """tell the server who we are"""
+        data = Helo().pack(
+            self.deviceid,
+            self.revision,   # firmware version
+            self.mac,
+            self.hostid,
+            self.wifichannels,   # unsigned short = two bytes
+            self.bytesreceived,  # unsigned long long = 8 bytes
+            self.language,
+        )
+        # EXTEND: also send capabilities information in HELO
+        self.send(data)
+
+    def action_stmt(self, timestamp=0):
         """report status information to the server"""
-        fields = structure.Stat()
+        fields = Stat()
         fields['event_code'] = b'STMt'
         fields['crlf'] = 0
         fields['mas_initialized'] = b'0'
@@ -120,77 +186,26 @@ class SlimClient(object):
         fields['error_code'] = 0
         self.send(fields.pack())
 
-    def cmd_strm(self, data):
+    ### Message Handlers
+
+    def handle_aude(self, message):
+        log.debug(str(message))
+
+    def handle_audg(self, message):
+        log.debug(str(message))
+
+    def handle_setd(self, message):
+        log.debug(str(message))
+
+    def handle_strm(self, message):
         """process a str command send by the server"""
         # do not trust documentation look at the source
         # in Slim/Player/Squeezebox.pm:540
-        log.debug('processing strm command %d bytes' % len(data))
-        fields = structure.Strm(data)
-        log.debug(str(fields))
-        if fields['command'] == b't':
-            self.stat_stmt(fields['replay_gain'])
+        # message has subcommands
+        self.handle_message(message, 'strm_%s' % message['command'].decode('ascii'))
 
-    def cmd_setd(self, data):
-        """get/set player settings in the firmware
-        Slim/Player/Squeezebox2.pm:919"""
-        log.warn('unimplemented command setd %s' % data)
-
-    def cmd_aude(self, data):
-        fields = structure.Aude(data)
-        log.debug(str(fields))
-
-    def cmd_audg(self, data):
-        # multiple version of this command exist.
-        fields = None
-        for candidate in [structure.Audg(), structure.AudgSequence()]:
-            log.debug('length %d, candidate %d' % (len(data), candidate.size()))
-            if len(data) == candidate.size():
-                candidate.unpack(data)
-                fields = candidate
-                break
-        if fields is None:
-            log.error('unknown audg command structure')
-            return
-        log.debug(str(fields))
-
-    def cmd_bye(self):
-        """send bye and disconnect"""
-        if self.is_connected:
-            data = structure.Bye().pack(upgrade=False)
-            try:
-                self.send(data)
-            except socket.timeout:
-                pass  # ignore timeout, the server might have gone
-        self.connection = None
-
-    def run(self):
-        """connect to slimserver, introduce self and wait for commands"""
-        self.connect()
-        self.helo()
-        i = 10
-        while True:
-            try:
-                command, data = self.receive_cmd()
-            except socket.timeout:
-                # no data from server
-                log.debug("timeout waiting for cmd")
-                if self.__terminate:
-                    return
-                else:
-                    continue
-            func = getattr(self, command)  # which function handles this?
-            func(data)  # pass data to function
-            # NEXT:
-            # handle the received commands
-            # reconnect if connection closes
-            i = i - 1
-            if i < 0:
-                break
-        self.cmd_bye()
-
-    def quit(self):
-        """set terminate flag. """
-        self.__terminate = True
+    def handle_strm_t(self, message):
+        self.action_stmt(message['replay_gain'])
 
 
 if __name__ == '__main__':
